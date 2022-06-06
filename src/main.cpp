@@ -34,4 +34,6 @@ void setup() {
 void loop() {
     boot.loop();
     bemfaMqtt.loop();
+
+    delay(100); // for power saving
 }
