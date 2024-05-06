@@ -1,95 +1,179 @@
 #pragma once
 
 #include <Arduino.h>
-#include <AsyncMqttClient.h>
 #include <ESP8266WiFi.h>
 #include <Ticker.h>
 #include <map>
 #include <list>
 #include <functional>
 
-class BemfaMqtt {
+class BemfaConnection {
+    friend class BemfaTcp;
 public:
-    typedef std::function<void(AsyncMqttClient& client, const String& topic, const String& msg)> MessageListener;
-    typedef std::function<void(AsyncMqttClient& client, const String& topic, uint8_t qos)> SubscribeListener;
-    typedef std::function<void(AsyncMqttClient& client, bool sessionPresent)> ConnectListener;
+    void publish(const char* topic, const char* payload) {
+        _client.printf("cmd=2&uid=%s&topic=%s&msg=%s\r\n", _client_id.c_str(), topic, payload);
+    };
+private:
+    typedef std::function<void()> ConnectListener;
+    typedef std::function<void(const char* topic, const char* payload)> MessageListener;
+
+    BemfaConnection() :
+        _want_connect(false),
+        _last_ping_time(0),
+        _buf_used(0) {};
+
+    void setServer(const char* host, uint16_t port) {
+        _host = host;
+        _port = port;
+    };
+
+    void setClientId(const char* client_id) {
+        _client_id = client_id;
+    };
+
+    void setConnect(bool want_connect) {
+        _want_connect = want_connect;
+    };
+
+    void subscribe(const char* topic) {
+        _client.printf("cmd=3&uid=%s&topic=%s\r\n", _client_id.c_str(), topic);
+    };
+
+    // void unsubscribe(const char* topic) {};
+
+    void onConnect(ConnectListener listener) {
+        _on_connect_listener = listener;
+    };
+
+    void onMessage(MessageListener listener) {
+        _on_message_listener = listener;
+    };
+
+    void loop() {
+        if (_want_connect) {
+            if (!_client.connected()) {
+                if (_client.connect(_host.c_str(), _port)) {
+                    if (_on_connect_listener) {
+                        _on_connect_listener();
+                    }
+                }
+            } else {
+                if (_client.available()) {
+                    auto n = _client.read(_buf + _buf_used, sizeof(_buf) - _buf_used);
+                    if (n > 0) {
+                        _buf_used += n;
+                        if (_buf[_buf_used - 1] == '\n') {
+                            if ((_buf_used > 2) && (_buf[_buf_used - 2] == '\r')) {
+                                _buf[_buf_used - 2] = 0;
+                                String msg(_buf);
+                                msg.trim();
+                                _buf_used = 0;
+
+                                auto topic_key_pos = msg.indexOf("&topic=");
+                                String topic;
+                                if (topic_key_pos >= 0) {
+                                    auto topic_end_pos = msg.indexOf("&", topic_key_pos + 7);
+                                    if (topic_end_pos >= 0) {
+                                        topic = msg.substring(topic_key_pos + 7, topic_end_pos);
+                                    }
+                                }
+                                auto msg_key_pos = msg.indexOf("&msg=");
+                                String msg_str;
+                                if (msg_key_pos >= 0) {
+                                    auto msg_end_pos = msg.indexOf("&", msg_key_pos + 5);
+                                    if (msg_end_pos < 0) {
+                                        msg_end_pos = msg.length();
+                                    }
+                                    msg_str = msg.substring(msg_key_pos + 5, msg_end_pos);
+                                }
+
+                                if (topic_key_pos >= 0 && msg_key_pos >= 0) {
+                                    if (_on_message_listener) {
+                                        _on_message_listener(topic.c_str(), msg_str.c_str());
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (_buf_used >= sizeof(_buf)) {
+                        _buf_used = 0;
+                    }
+                }
+
+                // ping every 15 seconds
+                if (millis() - _last_ping_time > 15000) {
+                    _client.print("ping\r\n");
+                    _last_ping_time = millis();
+                }
+            }
+        } else {
+            if (_client.connected()) {
+                _client.stop();
+            }
+        }
+    };
+
+private:
+    String _host;
+    uint16_t _port;
+    String _client_id;
+
+    ConnectListener _on_connect_listener;
+    MessageListener _on_message_listener;
+
+    WiFiClient _client;
+    bool _want_connect;
+
+    uint32_t _last_ping_time;
+    char _buf[256];
+    size_t _buf_used;
+};
+
+class BemfaTcp {
+public:
+    typedef std::function<void(BemfaConnection& conn, const String& topic, const String& msg)> MessageListener;
+    typedef std::function<void(BemfaConnection& conn)> ConnectListener;
 
     typedef struct {
         ConnectListener onConnect;
         MessageListener onMessage;
-        SubscribeListener onSubscribe;
-    } MqttEventListener;
+    } EventListener;
 
-    BemfaMqtt(const String& host, int port, const String& client_id)
+    BemfaTcp(const String& host, int port, const String& client_id)
         : _host(host), _port(port), _client_id(client_id) {
     };
 
-    void onEvent(const String& topic, MqttEventListener listener) {
+    void onEvent(const String& topic, EventListener listener) {
         _mlsm[topic].push_back(listener);
     };
 
     void begin() {
-        _mqtt_client.setServer(_host.c_str(), _port);
-        _mqtt_client.setClientId(_client_id.c_str());
+        _bemfa_conn.setServer(_host.c_str(), _port);
+        _bemfa_conn.setClientId(_client_id.c_str());
 
-        // Mqtt connection events
-        _mqtt_client.onConnect([this](bool sessionPresent) {
+        // Bemfa connection events
+        _bemfa_conn.onConnect([this]() {
             for (auto it = _mlsm.begin(); it != _mlsm.end(); ++it) {
-                auto pid = _mqtt_client.subscribe(it->first.c_str(), 1);
-                _pitm[pid] = it->first;
+                _bemfa_conn.subscribe(it->first.c_str());
             }
 
             for (auto it = _mlsm.begin(); it != _mlsm.end(); ++it) {
                 for (auto lsnr = it->second.begin(); lsnr != it->second.end(); ++lsnr) {
                     if (lsnr->onConnect) {
-                        lsnr->onConnect(_mqtt_client, sessionPresent);
+                        lsnr->onConnect(_bemfa_conn);
                     }
                 }
             }
         });
 
-        _mqtt_client.onDisconnect([this](AsyncMqttClientDisconnectReason reason) {
-            if (WiFi.isConnected()) {
-                _reconnect_ticker.once(2, [this]() {
-                    _connect();
-                });
-            }
-        });
-
-        // Mqtt subscribe events
-        _mqtt_client.onSubscribe([this](uint16_t packetId, uint8_t qos) {
-            if (_pitm.count(packetId) == 1) {
-                auto topic = _pitm[packetId];
-                auto lst = _mlsm.at(topic);
-                for (auto it = lst.begin(); it != lst.end(); ++it) {
-                    SubscribeListener lsnr = it->onSubscribe;
-                    if (lsnr) {
-                        lsnr(_mqtt_client, topic, qos);
-                    }
-                }
-            }
-        });
-
-        _mqtt_client.onUnsubscribe([this](uint16_t packetId) {
-            // Nothing to do
-        });
-
-        // Mqtt pub/msg events
-        _mqtt_client.onPublish([this](uint16_t packetId) {
-            // Nothing to do
-        });
-
-        _mqtt_client.onMessage([this](char* topic, char* payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total) {
-            auto msg = String("");
-            for (size_t i = 0; i < len; i ++) {
-                msg += payload[i];
-            }
+        _bemfa_conn.onMessage([this](const char* topic, const char* payload) {
             if (_mlsm.count(topic) == 1) {
                 auto lst = _mlsm.at(topic);
                 for (auto it = lst.begin(); it != lst.end(); ++it) {
                     MessageListener lsnr = it->onMessage;
                     if (lsnr) {
-                        lsnr(_mqtt_client, topic, msg);
+                        lsnr(_bemfa_conn, topic, payload);
                     }
                 }
             }
@@ -97,41 +181,33 @@ public:
 
         // WiFi events
         _got_ip_handler = WiFi.onStationModeGotIP([this](const WiFiEventStationModeGotIP &) {
-            _connect();
+            _bemfa_conn.setConnect(true);
         });
 
         _disconnected_handler = WiFi.onStationModeDisconnected([this](const WiFiEventStationModeDisconnected &) {
-            _reconnect_ticker.detach(); // ensure we don't reconnect to MQTT while reconnecting to Wi-Fi
+            _bemfa_conn.setConnect(false); // ensure we don't reconnect to Bemfa while reconnecting to Wi-Fi
         });
     };
 
     void loop() {
+        _bemfa_conn.loop();
     };
 
-    AsyncMqttClient &getMqttClient() {
-        return _mqtt_client;
+    BemfaConnection &getBemfaConnection() {
+        return _bemfa_conn;
     };
-private:
-    void _connect() {
-        _mqtt_client.connect();
-    };
-
 private:
     String _host;
     int _port;
     String _client_id;
 
-    typedef std::list<MqttEventListener> MqttEventListenerList;
+    typedef std::list<EventListener> MqttEventListenerList;
     typedef std::map<String, MqttEventListenerList> MqttEventListenersMap;
-    typedef std::map<uint16_t, String> PacketIdTopicMap;
 
     MqttEventListenersMap _mlsm;
-    PacketIdTopicMap _pitm;
 
-    AsyncMqttClient _mqtt_client;
+    BemfaConnection _bemfa_conn;
 
     WiFiEventHandler _got_ip_handler;
     WiFiEventHandler _disconnected_handler;
-
-    Ticker _reconnect_ticker;
 };

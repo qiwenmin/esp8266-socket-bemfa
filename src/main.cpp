@@ -10,7 +10,7 @@
 
 ESP8266Boot boot;
 
-BemfaMqtt bemfaMqtt(bemfa_mqtt_server, bemfa_mqtt_port, bemfa_mqtt_client_id);
+BemfaTcp bemfaTcp(bemfa_tcp_server, bemfa_tcp_port, bemfa_tcp_client_id);
 
 static String hostname;
 
@@ -19,9 +19,9 @@ void setup() {
     hostname = "so01x" + chipIdHex;
 
     // Init bemfaMqtt
-    register_socket_01_handler(boot, bemfaMqtt, hostname, boot.getLed());
+    register_socket_01_handler(boot, bemfaTcp, hostname, boot.getLed());
 
-    bemfaMqtt.begin();
+    bemfaTcp.begin();
 
     // Init boot
     boot.setLed(LED_PIN, LOW);
@@ -33,7 +33,7 @@ void setup() {
 
 void loop() {
     boot.loop();
-    bemfaMqtt.loop();
+    bemfaTcp.loop();
 
     delay(100); // for power saving
 }

@@ -50,14 +50,14 @@ static void update_relay(bool is_on) {
     }
 }
 
-static void publish_state(AsyncMqttClient& client, bool is_on) {
+static void publish_state(BemfaConnection& conn, bool is_on) {
     auto msg = is_on ? String("on") : String("off");
-    client.publish(topic_set.c_str(), 1, true, msg.c_str(), msg.length());
+    conn.publish(topic_set.c_str(), msg.c_str());
 }
 
-static BemfaMqtt::MqttEventListener mqtt_event_listener;
+static BemfaTcp::EventListener event_listener;
 
-void register_socket_01_handler(ESP8266Boot& boot, BemfaMqtt &bemfaMqtt, const String& topicPrefix, Led *theLed) {
+void register_socket_01_handler(ESP8266Boot& boot, BemfaTcp &bemfaTcp, const String& topicPrefix, Led *theLed) {
     led = theLed;
 
     // init hardware
@@ -71,7 +71,7 @@ void register_socket_01_handler(ESP8266Boot& boot, BemfaMqtt &bemfaMqtt, const S
         saved_state.relay_is_on = !saved_state.relay_is_on;
 
         update_relay(saved_state.relay_is_on);
-        publish_state(bemfaMqtt.getMqttClient(), saved_state.relay_is_on);
+        publish_state(bemfaTcp.getBemfaConnection(), saved_state.relay_is_on);
 
         save_state();
     });
@@ -81,7 +81,7 @@ void register_socket_01_handler(ESP8266Boot& boot, BemfaMqtt &bemfaMqtt, const S
     topic.toLowerCase();
     topic_set = topic + "/set";
 
-    mqtt_event_listener.onMessage = [](AsyncMqttClient& client, const String &topic, const String &msg) {
+    event_listener.onMessage = [](BemfaConnection& conn, const String &topic, const String &msg) {
         if (msg == "on") {
             if (!saved_state.relay_is_on) {
                 update_relay(true);
@@ -89,7 +89,7 @@ void register_socket_01_handler(ESP8266Boot& boot, BemfaMqtt &bemfaMqtt, const S
                 saved_state.relay_is_on = true;
                 save_state();
 
-                publish_state(client, true);
+                publish_state(conn, true);
             }
         } else if (msg == "off") {
             if (saved_state.relay_is_on) {
@@ -98,17 +98,17 @@ void register_socket_01_handler(ESP8266Boot& boot, BemfaMqtt &bemfaMqtt, const S
                 saved_state.relay_is_on = false;
                 save_state();
 
-                publish_state(client, false);
+                publish_state(conn, false);
             }
         }
     };
 
-    mqtt_event_listener.onConnect = [](AsyncMqttClient& client, bool sessionPresent) {
+    event_listener.onConnect = [](BemfaConnection& conn) {
         // report relay state
-        publish_state(client, saved_state.relay_is_on);
+        publish_state(conn, saved_state.relay_is_on);
     };
 
-    bemfaMqtt.onEvent(topic, mqtt_event_listener);
+    bemfaTcp.onEvent(topic, event_listener);
 
     load_state();
     update_relay(saved_state.relay_is_on);
